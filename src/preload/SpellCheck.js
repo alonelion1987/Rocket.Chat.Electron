@@ -1,117 +1,199 @@
-const fs = require('fs');
-const path = require('path');
-const checker = require('spellchecker');
-const { clipboard, remote, shell, webFrame } = require('electron');
-const i18n = require('../i18n/index');
+import { clipboard, remote, shell, webFrame } from 'electron';
+import fs from 'fs';
+import jetpack from 'fs-jetpack';
+import path from 'path';
+import spellchecker from 'spellchecker';
+import i18n from '../i18n/index';
+const { app, dialog, getCurrentWebContents, getCurrentWindow, Menu } = remote;
 
-const { app, dialog, getCurrentWebContents, getCurrentWindow, Menu, MenuItem } = remote;
 
-const webContents = getCurrentWebContents();
-let menu = new Menu();
-
-const localStorage = {
-	getItem(key) {
-		try {
-			return window.localStorage.getItem(key);
-		} catch (e) {
-			console.error(e);
-			return null;
-		}
-	},
-
-	setItem(key, value) {
-		try {
-			window.localStorage.setItem(key, value);
-		} catch (e) {
-			console.error(e);
-		}
-	},
+const applySpellCheckSuggestion = (suggestion) => {
+	getCurrentWebContents().replaceMisspelling(suggestion);
 };
 
+const downloadUrl = (url) => {
+	getCurrentWebContents().downloadURL(url);
+};
+
+const openLink = (url) => {
+	shell.openExternal(url);
+};
+
+const copyLinkText = (text) => {
+	clipboard.write({ text, bookmark: text });
+};
+
+const copyLinkAddress = (url, text) => {
+	clipboard.write({ text: url, bookmark: text });
+};
+
+
+const createMenuTemplate = ({
+	isEditable,
+	selectionText,
+	mediaType,
+	srcURL,
+	linkURL,
+	linkText,
+	editFlags: {
+		canUndo = false,
+		canRedo = false,
+		canCut = false,
+		canCopy = false,
+		canPaste = false,
+		canSelectAll = false,
+	} = {},
+	availableDictionaries = [],
+	enabledDictionaries = [],
+	spellingSuggestions = null,
+} = {}, {
+	applySpellCheckSuggestion,
+	toggleSpellCheckLanguage,
+	loadSpellCheckDictionaries,
+	downloadUrl,
+	openLink,
+	copyLinkText,
+	copyLinkAddress,
+} = {}) => [
+	...(Array.isArray(spellingSuggestions) ? [
+		...(spellingSuggestions.length === 0 ? (
+			[
+				{
+					label: i18n.__('No_suggestions'),
+					enabled: false,
+				},
+			]
+		) : (
+			spellingSuggestions.slice(0, 6).map((suggestion) => ({
+				label: suggestion,
+				click: () => applySpellCheckSuggestion(suggestion),
+			}))
+		)),
+		...(spellingSuggestions.length > 6 ? [
+			{
+				label: i18n.__('More_spelling_suggestions'),
+				submenu: spellingSuggestions.slice(6).map((suggestion) => ({
+					label: suggestion,
+					click: () => applySpellCheckSuggestion(suggestion),
+				})),
+			},
+		] : []),
+		{
+			type: 'separator',
+		},
+	] : []),
+	...(isEditable && selectionText === '' ? [
+		{
+			label: i18n.__('Spelling_languages'),
+			enabled: availableDictionaries.length > 0,
+			submenu: availableDictionaries.map((language) => ({
+				label: language,
+				type: 'checkbox',
+				checked: enabledDictionaries.includes(language),
+				click: ({ checked }) => toggleSpellCheckLanguage(language, checked),
+			})),
+		},
+		{
+			label: i18n.__('Browse_for_language'),
+			click: () => loadSpellCheckDictionaries(),
+		},
+		{
+			type: 'separator',
+		},
+	] : []),
+	...(mediaType === 'image' ? [
+		{
+			label: i18n.__('Save image as...'),
+			click: () => downloadUrl(srcURL),
+		},
+		{
+			type: 'separator',
+		},
+	] : []),
+	...(linkURL ? [
+		{
+			label: i18n.__('Open link'),
+			click: () => openLink(linkURL),
+		},
+		{
+			label: i18n.__('Copy link text'),
+			click: () => copyLinkText(linkText),
+			enabled: !!linkText,
+		},
+		{
+			label: i18n.__('Copy link address'),
+			click: () => copyLinkAddress(linkURL, linkText),
+		},
+		{
+			type: 'separator',
+		},
+	] : []),
+	{
+		label: i18n.__('&Undo'),
+		role: 'undo',
+		accelerator: 'CommandOrControl+Z',
+		enabled: canUndo,
+	},
+	{
+		label: i18n.__('&Redo'),
+		role: 'redo',
+		accelerator: process.platform === 'win32' ? 'Control+Y' : 'CommandOrControl+Shift+Z',
+		enabled: canRedo,
+	},
+	{
+		type: 'separator',
+	},
+	{
+		label: i18n.__('Cu&t'),
+		role: 'cut',
+		accelerator: 'CommandOrControl+X',
+		enabled: canCut,
+	},
+	{
+		label: i18n.__('&Copy'),
+		role: 'copy',
+		accelerator: 'CommandOrControl+C',
+		enabled: canCopy,
+	},
+	{
+		label: i18n.__('&Paste'),
+		role: 'paste',
+		accelerator: 'CommandOrControl+V',
+		enabled: canPaste,
+	},
+	{
+		label: i18n.__('Select &all'),
+		role: 'selectall',
+		accelerator: 'CommandOrControl+A',
+		enabled: canSelectAll,
+	},
+];
+
+
 class SpellCheck {
-
 	constructor() {
-		this.enabledDictionaries = [];
-
-		this.contractions = [
-			"ain't", "aren't", "can't", "could've", "couldn't", "couldn't've", "didn't", "doesn't", "don't", "hadn't",
-			"hadn't've", "hasn't", "haven't", "he'd", "he'd've", "he'll", "he's", "how'd", "how'll", "how's", "I'd",
-			"I'd've", "I'll", "I'm", "I've", "isn't", "it'd", "it'd've", "it'll", "it's", "let's", "ma'am", "mightn't",
-			"mightn't've", "might've", "mustn't", "must've", "needn't", "not've", "o'clock", "shan't", "she'd", "she'd've",
-			"she'll", "she's", "should've", "shouldn't", "shouldn't've", "that'll", "that's", "there'd", "there'd've",
-			"there're", "there's", "they'd", "they'd've", "they'll", "they're", "they've", "wasn't", "we'd", "we'd've",
-			"we'll", "we're", "we've", "weren't", "what'll", "what're", "what's", "what've", "when's", "where'd",
-			"where's", "where've", "who'd", "who'll", "who're", "who's", "who've", "why'll", "why're", "why's", "won't",
-			"would've", "wouldn't", "wouldn't've", "y'all", "y'all'd've", "you'd", "you'd've", "you'll", "you're", "you've",
-		].reduce((contractionMap, word) => {
-			contractionMap[word.replace(/'.*/, '')] = true;
-			return contractionMap;
-		}, {});
-
 		this.loadAvailableDictionaries();
 		this.setEnabledDictionaries();
-
-		this.languagesMenu = {
-			label: i18n.__('Spelling_languages'),
-			submenu: this.availableDictionaries.map((dictionary) => {
-				const menu = {
-					label: dictionary,
-					type: 'checkbox',
-					checked: this.enabledDictionaries.includes(dictionary),
-					click: (menuItem) => {
-						menu.checked = menuItem.checked;
-						// If not using os dictionary then limit to only 1 language
-						if (!this.multiLanguage && this.languagesMenu.submenu) {
-							this.languagesMenu.submenu.forEach((m) => {
-								if (m.label !== menuItem.label) {
-									m.checked = false;
-								}
-							});
-						}
-						if (menuItem.checked) {
-							this.setEnabled(dictionary);
-						} else {
-							this.disable(dictionary);
-						}
-						this.saveEnabledDictionaries();
-					},
-				};
-				return menu;
-			}),
-		};
-
-		this.browseForLanguageMenu = new MenuItem({
-			label: i18n.__('Browse_for_language'),
-			click: () => {
-				dialog.showOpenDialog({
-					title: i18n.__('Open_Language_Dictionary'),
-					defaultPath: this.dictionariesPath,
-					filters: { name: 'Dictionaries', extensions: ['aff', 'dic'] },
-					properties: ['openFile', 'multiSelections'],
-				},
-				(filePaths) => { this.installDictionariesFromPaths(filePaths); }
-				);
-			},
-		});
 	}
 
-	get userLanguage() {
-		const lang = localStorage.getItem('userLanguage');
-		return lang ? lang.replace('-', '_') : null;
+	loadAvailableDictionaries() {
+		const embeddedDictionaries = spellchecker.getAvailableDictionaries();
+
+		const dictionariesDir = jetpack.cwd(app.getAppPath(), app.getAppPath().endsWith('app.asar') ? '..' : '.',
+			'dictionaries');
+		const installedDictionaries = dictionariesDir.find({ matching: '*.{aff,dic}' })
+			.map((fileName) => path.basename(fileName, path.extname(fileName)).replace('-', '_'));
+
+		this.isMultiLanguage = embeddedDictionaries.length > 0 && process.platform !== 'win32';
+		this.dictionariesPath = dictionariesDir.path();
+		this.availableDictionaries = this.isMultiLanguage ?
+			Array.from(new Set([...embeddedDictionaries, ...installedDictionaries])).sort() :
+			Array.from(new Set([...embeddedDictionaries])).sort();
 	}
 
-	get dictionaries() {
-		const dictionaries = localStorage.getItem('spellcheckerDictionaries');
-		const result = JSON.parse(dictionaries || '[]');
-		return Array.isArray(result) ? result : [];
-	}
-
-	/**
-     * Set enabled dictionaries on load
-     * Either sets enabled dictionaries to saved preferences, or enables the first
-     * dictionary that is valid based on system (defaults to en_US)
-     */
 	setEnabledDictionaries() {
+		this.enabledDictionaries = [];
+
 		const { dictionaries } = this;
 		if (dictionaries) {
 			// Dictionary disabled
@@ -151,21 +233,15 @@ class SpellCheck {
 
 	}
 
-	loadAvailableDictionaries() {
-		this.availableDictionaries = checker.getAvailableDictionaries().sort();
-		if (this.availableDictionaries.length === 0) {
-			this.multiLanguage = false;
-			// Dictionaries path is correct for build
-			this.dictionariesPath = path.join(
-				app.getAppPath(),
-				app.getAppPath().endsWith('app.asar') ? '..' : '.',
-				'dictionaries'
-			);
-			this.getDictionariesFromInstallDirectory();
-		} else {
-			this.multiLanguage = process.platform !== 'win32';
-			this.availableDictionaries = this.availableDictionaries.map((dict) => dict.replace('-', '_'));
-		}
+	get userLanguage() {
+		const language = localStorage.getItem('userLanguage');
+		return language ? language.replace('-', '_') : null;
+	}
+
+	get dictionaries() {
+		const dictionaries = localStorage.getItem('spellcheckerDictionaries');
+		const result = JSON.parse(dictionaries || '[]');
+		return Array.isArray(result) ? result : [];
 	}
 
 	/**
@@ -195,20 +271,6 @@ class SpellCheck {
 			}));
 	}
 
-	getDictionariesFromInstallDirectory() {
-		if (this.dictionariesPath) {
-			const fileNames = fs.readdirSync(this.dictionariesPath);
-			for (const fileName of fileNames) {
-				const dictionaryExtension = fileName.slice(-3);
-				const dictionaryName = fileName.slice(0, -4);
-				if (!this.availableDictionaries.includes(dictionaryName)
-                    && (dictionaryExtension === 'aff' || dictionaryExtension === 'dic')) {
-					this.availableDictionaries.push(dictionaryName);
-				}
-			}
-		}
-	}
-
 	setEnabled(dictionaries) {
 		dictionaries = [].concat(dictionaries);
 		let result = false;
@@ -217,9 +279,9 @@ class SpellCheck {
 				result = true;
 				this.enabledDictionaries.push(dictionaries[i]);
 				// If using Hunspell or Windows then only allow 1 language for performance reasons
-				if (!this.multiLanguage) {
+				if (!this.isMultiLanguage) {
 					this.enabledDictionaries = [dictionaries[i]];
-					checker.setDictionary(dictionaries[i], this.dictionariesPath);
+					spellchecker.setDictionary(dictionaries[i], this.dictionariesPath);
 					return true;
 				}
 			}
@@ -228,9 +290,9 @@ class SpellCheck {
 	}
 
 	disable(dictionary) {
-		const pos = this.enabledDictionaries.indexOf(dictionary);
-		if (pos !== -1) {
-			this.enabledDictionaries.splice(pos, 1);
+		const index = this.enabledDictionaries.indexOf(dictionary);
+		if (index > -1) {
+			this.enabledDictionaries.splice(index, 1);
 		}
 	}
 
@@ -242,172 +304,106 @@ class SpellCheck {
 		this.setupContextMenuListener();
 	}
 
-	createMenuTemplate() {
-		return [
-			{
-				label: i18n.__('&Undo'),
-				role: 'undo',
-				accelerator: 'CommandOrControl+Z',
-			},
-			{
-				label: i18n.__('&Redo'),
-				role: 'redo',
-				accelerator: process.platform === 'win32' ? 'Control+Y' : 'CommandOrControl+Shift+Z',
-			},
-			{
-				type: 'separator',
-			},
-			{
-				label: i18n.__('Cu&t'),
-				role: 'cut',
-				accelerator: 'CommandOrControl+X',
-			},
-			{
-				label: i18n.__('&Copy'),
-				role: 'copy',
-				accelerator: 'CommandOrControl+C',
-			},
-			{
-				label: i18n.__('&Paste'),
-				role: 'paste',
-				accelerator: 'CommandOrControl+V',
-			},
-			{
-				label: i18n.__('Select &all'),
-				role: 'selectall',
-				accelerator: 'CommandOrControl+A',
-			},
-		];
-	}
-
 	saveEnabledDictionaries() {
 		localStorage.setItem('spellcheckerDictionaries', JSON.stringify(this.enabledDictionaries));
 	}
 
 	isCorrect(text) {
-		if (!this.enabledDictionaries.length || this.contractions[text.toLocaleLowerCase()]) {
+		if (!this.enabledDictionaries.length) {
 			return true;
 		}
 
-		if (this.multiLanguage) {
-			for (let i = 0; i < this.enabledDictionaries.length; i++) {
-				checker.setDictionary(this.enabledDictionaries[i]);
-				if (!checker.isMisspelled(text)) {
-					return true;
-				}
+		for (const language of this.enabledDictionaries) {
+			spellchecker.setDictionary(language, this.dictionariesPath);
+			if (!spellchecker.isMisspelled(text)) {
+				return true;
 			}
-		} else {
-			return !checker.isMisspelled(text);
 		}
+
 		return false;
 	}
 
 	getCorrections(text) {
-		if (!this.multiLanguage) {
-			return checker.getCorrectionsForMisspelling(text);
-		}
-
-		const allCorrections = this.enabledDictionaries.map((dictionary) => {
-			checker.setDictionary(dictionary);
-			return checker.getCorrectionsForMisspelling(text);
+		const allCorrections = this.enabledDictionaries.map((language) => {
+			spellchecker.setDictionary(language, this.dictionariesPath);
+			return spellchecker.getCorrectionsForMisspelling(text);
 		}).filter((c) => c.length > 0);
 
 		const length = Math.max(...allCorrections.map((a) => a.length));
 
-		// Get the best suggestions of each language first
 		const corrections = [];
 		for (let i = 0; i < length; i++) {
 			corrections.push(...allCorrections.map((c) => c[i]).filter((c) => c));
 		}
 
-		// Remove duplicates
-		return [...new Set(corrections)];
+		return Array.from(new Set(corrections));
 	}
 
 	setupContextMenuListener() {
-		webContents.on('context-menu', (event, properties) => {
+		getCurrentWebContents().on('context-menu', (event, params) => {
 			event.preventDefault();
 
-			const template = this.createMenuTemplate();
-
-			if (this.languagesMenu && this.browseForLanguageMenu) {
-				template.unshift({ type: 'separator' });
-				if (this.dictionariesPath) {
-					template.unshift(this.browseForLanguageMenu);
-				}
-				template.unshift(this.languagesMenu);
-			}
-
-			if (properties.mediaType === 'image') {
-				template.unshift({
-					type: 'separator',
-				}, {
-					label: i18n.__('Save_Image'),
-					click: () => {
-						webContents.downloadURL(properties.srcURL);
-					},
-				});
-			}
-
-			setTimeout(() => {
-				if (properties.linkURL !== '') {
-					const targetLink = properties.linkURL;
-
-					template.unshift({
-						label: i18n.__('Open_Link'),
-						click: () => {
-							shell.openExternal(targetLink);
-						},
-					}, {
-						label: i18n.__('Copy_Link'),
-						click: () => {
-							clipboard.write({
-								text: properties.linkURL,
-								bookmark: properties.linkText,
-							});
-						},
-					});
-				}
-
-				if (properties.isEditable && properties.selectionText !== '') {
-					const text = properties.selectionText.toString().trim();
-					if (text !== '' && !this.isCorrect(text)) {
-						const options = this.getCorrections(text);
-						const maxItems = Math.min(options.length, 6);
-
-						if (maxItems > 0) {
-							const suggestions = [];
-							const onClick = function(menuItem) {
-								webContents.replaceMisspelling(menuItem.label);
-							};
-
-							for (let i = 0; i < options.length; i++) {
-								const item = options[i];
-								suggestions.push({ label: item, click: onClick });
-							}
-
-							template.unshift({ type: 'separator' });
-
-							if (suggestions.length > maxItems) {
-								const moreSuggestions = {
-									label: i18n.__('More_spelling_suggestions'),
-									submenu: suggestions.slice(maxItems),
-								};
-								template.unshift(moreSuggestions);
-							}
-
-							template.unshift.apply(template, suggestions.slice(0, maxItems));
-						} else {
-							template.unshift({ label: i18n.__('No_suggestions'), enabled: false });
-						}
+			const actions = {
+				applySpellCheckSuggestion,
+				toggleSpellCheckLanguage: (language, checked) => {
+					if (!this.isMultiLanguage) {
+						this.enabledDictionaries = [];
 					}
-				}
 
-				menu = Menu.buildFromTemplate(template);
-				menu.popup(getCurrentWindow(), undefined, undefined, 5);
-			}, 0);
+					if (checked) {
+						this.setEnabled(language);
+					} else {
+						this.disable(language);
+					}
+
+					this.saveEnabledDictionaries();
+				},
+				loadSpellCheckDictionaries: () => {
+					dialog.showOpenDialog(
+						getCurrentWindow(),
+						{
+							title: i18n.__('Open_Language_Dictionary'),
+							defaultPath: this.dictionariesPath,
+							filters: [
+								{ name: 'Dictionaries', extensions: ['aff', 'dic'] },
+							],
+							properties: ['openFile', 'multiSelections'],
+						},
+						(filePaths) => {
+							this.installDictionariesFromPaths(filePaths);
+						}
+					);
+				},
+				downloadUrl,
+				openLink,
+				copyLinkText,
+				copyLinkAddress,
+			};
+
+			const template = createMenuTemplate({
+				...params,
+				availableDictionaries: this.availableDictionaries,
+				enabledDictionaries: this.enabledDictionaries,
+				spellingSuggestions: (({ isEditable, selectionText }) => {
+					if (!isEditable || selectionText === '') {
+						return null;
+					}
+
+					const text = selectionText.toString().trim();
+
+					if (text === '' || this.isCorrect(text)) {
+						return null;
+					}
+
+					return this.getCorrections(text);
+				})(params),
+			}, actions);
+
+			const menu = Menu.buildFromTemplate(template);
+			menu.popup({ window: getCurrentWindow() });
 		}, false);
 	}
 }
 
-module.exports = SpellCheck;
+
+export default SpellCheck;
